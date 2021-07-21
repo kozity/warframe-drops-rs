@@ -17,61 +17,103 @@ fn main() {
                 .text()
                 .expect("request failure");
             fs::write(&path_tables, &body).expect("write failure");
+        } else if &key[..] == "--dedicated" || &key[..] == "-d" {
+            // The "--dedicated" flag will return only one table if the listed key has its own in
+            // the drop tables; otherwise, it will inform the user that no such table exists.
+            let key = args.next().expect("missing key");
+            let tables = fs::read_to_string(path_tables).expect("read failrue");
+            let narrowed = dedicated_table(&tables, &key);
+            println!("{}", narrowed);
         } else {
-            let iter = fs::read_to_string(path_tables).expect("read failure");
-            let mut iter = iter
-                .split("><")
-                .filter_map(|string| {
-                    if string.starts_with('/') { return None; }
-                    //else { println!("{}", string); } // test
-                    let string = &string.to_ascii_lowercase();
-                    let (bracket_1, bracket_2) = match (string.find('>'), string.find('<')) {
-                        (Some(first), Some(second)) => (first, second),
-                        _ => return Some((string, "")),
-                    };
-                    Some((&string[0..bracket_1], &string[bracket_1 + 1..bracket_2]))
-                });
-            let mut headers: Vec<String> = Vec::new();
-            loop { // eat introductory header
-                if let Some(pair) = iter.next() {
-                    if pair.1 == "Missions:" { break; }
-                }
-            }
-            let mut in_dedicated_table = false;
-            for pair in iter {
-                println!("{:?}", pair); // test
-                if in_dedicated_table {
-                    if pair.0.contains("blank") {
-                        in_dedicated_table = false;
-                        continue;
-                    } else {
-                        print!("\t{}", pair.1); // TODO: adjust indentation
-                    }
-                }
-                if pair.0.starts_with("th") {
-                    if pair.1 == &key {
-                        print!("{}", pair.1); // TODO: adjust indentation
-                        in_dedicated_table = true;
-                    }
-                } else if pair.0.starts_with("td") {
-                    if pair.1.contains(&key) {
-                        let mut i = 0;
-                        while i < headers.len() {
-                            print!("{}", headers[i]);
-                            i += 1;
-                            for _ in 0..i {
-                                print!("\t");
-                            }
-                        }
-                        print!("{}", pair.1); // TODO: LATEST: nothing is printing for some reason.
-                        headers.pop();
-                    }
-                } else if pair.0.starts_with("tr") { // TODO: adjust
-                    print!("\n");
-                }
-            }
+            let tables = fs::read_to_string(path_tables).expect("read failure");
+            let narrowed = drop_info(&tables, &key);
+            println!("{}", narrowed);
         }
     } else {
         eprintln!("usage: {} [ --update | <search key> ]", invocation);
     }
+}
+
+fn dedicated_table(tables: &str, key: &str) -> String {
+    let key = key.to_ascii_lowercase();
+    let mut lines: Vec<String> = Vec::new();
+
+    tables.split("<tr")
+        .filter(|string| {
+            !string.contains("blank-row")
+        })
+        .skip_while(|string| !string.contains("><th ") || !string.to_ascii_lowercase().contains(&key))
+        .take_while(|string| !string.contains("><th ") || string.to_ascii_lowercase().contains(&key))
+        .map(|string| {
+            let mut line = string
+                .split(&['<', '>'][..])
+                .skip(3)
+                .step_by(4)
+                .filter(|string| !string.is_empty())
+                .collect::<Vec<&str>>()
+                .join(" : ");
+            if string.contains("Rotation") {
+                lines.push(String::new());
+            } else if !string.contains("><th ") {
+                line = format!("\t{}", line);
+            }
+            lines.push(line);
+        })
+        .last(); // last() is here to consume the iterator
+
+    lines.join("\n")
+}
+
+fn drop_info(tables: &str, key: &str) -> String {
+    let key = key.to_ascii_lowercase();
+    let mut lines: Vec<String> = Vec::new();
+    let mut headers: (Option<&str>, Option<&str>) = (None, None);
+    let mut push_next = false;
+    let mut indentation = 0;
+
+    tables.split("><")
+        .skip_while(|string| !string.contains("Missions:"))
+        .filter(|string|
+            !string.starts_with('/')
+            && string.len() > 2
+            && !string.contains("blank-row")
+            && !string.starts_with("h3")
+            && !string.starts_with("tr ")
+            && !string.starts_with("td ")
+            && string != &"table"
+        )
+        .map(|string| {
+            let content = string
+                .split(&['<', '>'][..])
+                .nth(1).expect("parsing error");
+            if string.starts_with("th") {
+                if content.contains("Rotation") || content.contains('%') {
+                    headers.1 = Some(content);
+                } else {
+                    headers.0 = Some(content);
+                    headers.1 = None;
+                }
+            } else if content.to_ascii_lowercase().contains(&key) {
+                if let Some(header) = headers.0.take() {
+                    indentation = 0;
+                    lines.push(format!("\n{}{}", "\t".repeat(indentation), header));
+                    indentation += 1;
+                }
+                if let Some(header) = headers.1.take() {
+                    indentation = 1;
+                    lines.push(format!("{}{}", "\t".repeat(indentation), header));
+                    indentation += 1;
+                }
+                lines.push(format!("{}{}", "\t".repeat(indentation), content));
+                indentation += 3;
+                push_next = true;
+            } else if push_next {
+                lines.push(format!("{}{}", "\t".repeat(indentation), content));
+                indentation -= 3;
+                push_next = false;
+            }
+        })
+        .last(); // last() is here to consume the iterator
+
+    lines.join("\n")
 }
